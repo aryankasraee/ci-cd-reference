@@ -24,8 +24,9 @@ jobs:
       - name: Evaluate main
         id: eval
         run: |
-          head=$(gh api "repos/$REPO/commits/main" --jq .sha)
-          runs=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?branch=main&per_page=20")
+          branch=$(gh api "repos/$REPO" --jq .default_branch)
+          head=$(gh api "repos/$REPO/commits/$branch" --jq .sha)
+          runs=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?branch=$branch&per_page=20")
           for_head=$(jq -r --arg sha "$head" '[.workflow_runs[] | select(.head_sha==$sha)] | length' <<<"$runs")
           last=$(jq -r '[.workflow_runs[] | select(.status=="completed" and .conclusion!="cancelled")][0].conclusion // "none"' <<<"$runs")
           problem=""
