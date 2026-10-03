@@ -1,0 +1,112 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same ref cancels the older run, so a fast-moving main
+# never queues stale work. The watchdog (ci-watchdog.yml) covers the case
+# where a cancelled run leaves a commit untested.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.work
+      # Fail loudly when the installed toolchain is older than the go.work
+      # directive, instead of failing later with a confusing build error.
+      - name: Toolchain matches go.work
+        run: |
+          need=$(awk '/^go /{print $2}' go.work)
+          have=$(go env GOVERSION | sed 's/^go//')
+          printf '%s\n%s\n' "$need" "$have" | sort -V -C || {
+            echo "toolchain $have is older than go.work requires ($need)"; exit 1; }
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  lint:
+    needs: preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [api, worker]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.work
+      - uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.14.0
+          working-directory: modules/${{ matrix.module }}
+
+  test:
+    needs: preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [api, worker]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.work
+      - name: Test with race detector
+        working-directory: modules/${{ matrix.module }}
+        run: go test -race -count=1 ./...
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [api, worker]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.4.1
+      - name: Build image (no push)
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: modules/${{ matrix.module }}
+          load: true
+          tags: ci-cd-reference/${{ matrix.module }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.module }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.module }}
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0.24.3
+        with:
+          image: ci-cd-reference/${{ matrix.module }}:${{ github.sha }}
+          artifact-name: sbom-${{ matrix.module }}.spdx.json
+
+  # Single required check for branch protection: add this one job instead of
+  # every matrix leg, so adding a module never means editing protection rules.
+  ci:
+    if: always()
+    needs: [preflight, secrets, lint, test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs succeeded
+        run: |
+          [ "${{ contains(needs.*.result, 'failure') }}" = "false" ] &&
+          [ "${{ contains(needs.*.result, 'cancelled') }}" = "false" ]

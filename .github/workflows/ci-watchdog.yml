@@ -1,0 +1,50 @@
+name: ci-watchdog
+
+# Green last run is not proof main is tested: a push can race an active run and
+# get cancelled, leaving the newest commit with no run at all. This checks both
+# conditions on a schedule and keeps one tracking issue open while broken.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TITLE: "CI watchdog: main is red or untested"
+    steps:
+      - name: Evaluate main
+        id: eval
+        run: |
+          head=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          runs=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?branch=main&per_page=20")
+          for_head=$(jq -r --arg sha "$head" '[.workflow_runs[] | select(.head_sha==$sha)] | length' <<<"$runs")
+          last=$(jq -r '[.workflow_runs[] | select(.status=="completed" and .conclusion!="cancelled")][0].conclusion // "none"' <<<"$runs")
+          problem=""
+          [ "$for_head" = "0" ] && problem="head $head has no CI run at all"
+          [ "$last" != "success" ] && [ "$last" != "none" ] && problem="last finished run on main: $last"
+          echo "problem=$problem" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+      - name: Open or update tracking issue
+        if: steps.eval.outputs.problem != ''
+        env:
+          PROBLEM: ${{ steps.eval.outputs.problem }}
+          HEAD_SHA: ${{ steps.eval.outputs.head }}
+        run: |
+          n=$(gh issue list -R "$REPO" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          body="$PROBLEM (head $HEAD_SHA)"
+          if [ -z "$n" ]; then gh issue create -R "$REPO" --title "$TITLE" --body "$body"
+          else gh issue comment "$n" -R "$REPO" --body "$body"; fi
+      - name: Close tracking issue on recovery
+        if: steps.eval.outputs.problem == ''
+        run: |
+          n=$(gh issue list -R "$REPO" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          [ -n "$n" ] && gh issue close "$n" -R "$REPO" --comment "main is green and tested again." || true
