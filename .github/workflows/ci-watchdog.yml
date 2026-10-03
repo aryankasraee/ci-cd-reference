@@ -4,6 +4,10 @@ name: ci-watchdog
 # get cancelled, leaving the newest commit with no run at all. This checks both
 # conditions on a schedule and keeps one tracking issue open while broken.
 on:
+  # Runs when this file changes, so an edit is exercised immediately instead of
+  # waiting up to 30 minutes for the schedule.
+  push:
+    paths: [".github/workflows/ci-watchdog.yml"]
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
